@@ -1,114 +1,78 @@
-import os
-import glob
-import time
-import torch
+import streamlit as st
 import cv2
 from PIL import Image
 import numpy as np
-import pandas as pd
-from matplotlib import pyplot as plt
-from tqdm import tqdm
+import torch
 from facenet_pytorch import MTCNN, InceptionResnetV1
-import streamlit as st
 
-# Define device
-device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-print(f'Running on device: {device}')
+# Assuming your existing Python modules (video_processing.py, face_detection.py,
+# feature_extraction.py, classification.py) are in the same directory or
+# accessible in your Python path. If not, adjust the imports accordingly.
+from src.video_processing import load_video, extract_frames
+from src.face_detection import FaceDetector
+from src.feature_extraction import FeatureExtractor
+from src.classification import DeepfakeClassifier
 
-# Load face detector
-mtcnn = MTCNN(margin=14, keep_all=True, factor=0.5, device=device).eval()
+# Set device for model inference
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-# Load facial recognition model
-resnet = InceptionResnetV1(pretrained='vggface2', device=device).eval()
+# Load pre-trained models (load them once outside the prediction function for efficiency)
+face_detector = FaceDetector(device=device)
+feature_extractor = FeatureExtractor(device=device)
+deepfake_classifier = DeepfakeClassifier()
 
-# Define DetectionPipeline class
-class DetectionPipeline:
-    def __init__(self, detector, n_frames=None, batch_size=60, resize=None):
-        self.detector = detector
-        self.n_frames = n_frames
-        self.batch_size = batch_size
-        self.resize = resize
+def predict_deepfake_probability(video_file):
+    """
+    Predicts the probability of a video being a deepfake.
 
-    def __call__(self, filename):
-        v_cap = cv2.VideoCapture(filename)
-        v_len = int(v_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    Args:
+        video_file: Uploaded video file object.
 
-        if self.n_frames is None:
-            sample = np.arange(0, v_len)
-        else:
-            sample = np.linspace(0, v_len - 1, self.n_frames).astype(int)
+    Returns:
+        float: Probability of the video being a deepfake.
+    """
+    try:
+        # Save the uploaded video to a temporary file
+        with open("temp_video.mp4", "wb") as f:
+            f.write(video_file.read())
+        video_path = "temp_video.mp4"
 
-        faces = []
-        frames = []
-        for j in range(v_len):
-            success = v_cap.grab()
-            if j in sample:
-                success, frame = v_cap.retrieve()
-                if not success:
-                    continue
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frame = Image.fromarray(frame)
+        cap = load_video(video_path)
+        frames = extract_frames(cap, frame_interval=5)  # Adjust frame interval as needed
 
-                if self.resize is not None:
-                    frame = frame.resize([int(d * self.resize) for d in frame.size])
-                frames.append(frame)
+        faces = face_detector.detect_faces(frames)
+        embeddings = feature_extractor.extract_features(faces) if faces else None
 
-                if len(frames) % self.batch_size == 0 or j == sample[-1]:
-                    faces.extend(self.detector(frames))
-                    frames = []
+        probability = deepfake_classifier.predict_deepfake(embeddings)
 
-        v_cap.release()
-        return faces
+        return probability
 
-# Process embeddings
-def process_faces(faces, resnet):
-    faces = [f for f in faces if f is not None]
-    faces = torch.cat(faces).to(device)
+    except Exception as e:
+        st.error(f"An error occurred during processing: {e}")
+        return None
+    finally:
+        import os
+        if os.path.exists("temp_video.mp4"):
+            os.remove("temp_video.mp4")
 
-    embeddings = resnet(faces)
-    centroid = embeddings.mean(dim=0)
-    distances = (embeddings - centroid).norm(dim=1).cpu().numpy()
-    
-    return distances
+# Streamlit App
+st.title("Deepfake Video Detector")
+st.markdown("Upload a video to check if it's likely a deepfake.")
 
-# Load video filenames
-video_dir = 'test_videos/'  # Replace with your video directory
-filenames = glob.glob(os.path.join(video_dir, '*.mp4'))
+uploaded_file = st.file_uploader("Choose a video file...", type=["mp4", "mov", "avi"])
 
-# Initialize pipeline and process videos
-detection_pipeline = DetectionPipeline(detector=mtcnn, batch_size=60, resize=0.25)
-X = []
-start = time.time()
-n_processed = 0
+if uploaded_file is not None:
+    st.video(uploaded_file)  # Display the uploaded video
 
-with torch.no_grad():
-    for filename in tqdm(filenames):
-        try:
-            faces = detection_pipeline(filename)
-            X.append(process_faces(faces, resnet))
-        except Exception as e:
-            print(f"Error processing {filename}: {e}")
-            X.append(None)
-        
-        n_processed += len(faces)
-        print(f'Frames per second: {n_processed / (time.time() - start):6.3}', end='\r')
+    if st.button("Analyze Video"):
+        with st.spinner("Analyzing video..."):
+            probability = predict_deepfake_probability(uploaded_file)
 
-# Placeholder for predictions
-bias = -0.2942
-weight = 0.68235746
-submission = []
-
-for filename, x_i in zip(filenames, X):
-    if x_i is not None:
-        prob = 1 / (1 + np.exp(-(bias + (weight * x_i).mean())))
-    else:
-        prob = 0.5
-    submission.append([os.path.basename(filename), prob])
-
-# Save results
-submission = pd.DataFrame(submission, columns=['filename', 'label'])
-submission.sort_values('filename').to_csv('submission.csv', index=False)
-
-# Plot histogram
-plt.hist(submission.label, 20)
-st.pyplot(plt)
+        if probability is not None:
+            st.subheader("Prediction:")
+            if probability > 0.5:
+                st.error(f"Likely **FAKE** (Probability: {probability:.4f})")
+            else:
+                st.success(f"Likely **REAL** (Probability: {1 - probability:.4f})")
+            st.write(f"Probability of being FAKE: **{probability * 100:.2f}%**")
+            st.write(f"Probability of being REAL: **{(1 - probability) * 100:.2f}%**")
