@@ -11,6 +11,8 @@ class FeatureExtractor:
     def extract_features(self, face_images):
         """Extracts feature embeddings from a list of face images."""
         face_tensors = [self.transform(face).unsqueeze(0).to(self.device) for face in face_images]
+        for tensor in face_tensors:
+            print(f"Face tensor shape: {tensor.shape}")
         if not face_tensors:
             return None
         face_batches = torch.cat(face_tensors, dim=0)

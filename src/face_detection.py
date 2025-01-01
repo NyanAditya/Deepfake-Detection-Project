@@ -15,6 +15,9 @@ class FaceDetector:
                 for box in boxes:
                     face_img = frames[i][int(box[1]):int(box[3]), int(box[0]):int(box[2])]
                     if face_img.size > 0: # Check if the cropped image is valid
+                        print(f"Detected face shape: {face_img.size}")
+                        face_pil = Image.fromarray(face_img)
+                        resized_face = face_pil.resize((160, 160))
                         detected_faces.append(Image.fromarray(face_img))
         return detected_faces
 
